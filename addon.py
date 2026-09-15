@@ -767,6 +767,7 @@ class BlenderMCPServer:
             "get_object_info": self.get_object_info,
             "get_viewport_screenshot": self.get_viewport_screenshot,
             "execute_code": self.execute_code,
+            "upload_model_to_server": self.upload_model_to_server,
             "drain_human_activity": self.drain_human_activity,
             "get_telemetry_consent": self.get_telemetry_consent,
             "set_telemetry_consent": self.set_telemetry_consent,
@@ -1380,6 +1381,109 @@ class BlenderMCPServer:
             return {"executed": True, "result": captured_output}
         except Exception as e:
             raise Exception(f"Code execution error: {str(e)}")
+
+    def upload_model_to_server(self, server_url, object_name=None, file_format="glb",
+                               file_name=None, field_name="file", headers=None,
+                               extra_fields=None, timeout=120):
+        """Export the scene (or a single object) to a 3D model file and upload it to a server via HTTP POST"""
+        fmt = (file_format or "glb").lower().lstrip(".")
+        suffixes = {"glb": ".glb", "obj": ".obj", "fbx": ".fbx", "stl": ".stl", "ply": ".ply", "usd": ".usd"}
+        if fmt not in suffixes:
+            raise ValueError(f"Unsupported export format '{file_format}'. Supported: {', '.join(sorted(suffixes))}")
+
+        def has_op(op):
+            try:
+                op.get_rna_type()
+                return True
+            except Exception:
+                return False
+
+        target = None
+        if object_name:
+            target = bpy.data.objects.get(object_name)
+            if target is None:
+                raise ValueError(f"Object '{object_name}' not found in the scene")
+
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix=suffixes[fmt], prefix="blendermcp_export_")
+            os.close(fd)
+
+            # Select the target object (and its children) when exporting a single object
+            if target is not None:
+                bpy.ops.object.select_all(action='DESELECT')
+                def select_recursive(obj):
+                    obj.select_set(True)
+                    for child in obj.children:
+                        select_recursive(child)
+                select_recursive(target)
+                bpy.context.view_layer.objects.active = target
+
+            if fmt == "glb":
+                bpy.ops.export_scene.gltf(filepath=tmp_path, export_format='GLB',
+                                          use_selection=target is not None)
+            elif fmt == "obj":
+                if has_op(bpy.ops.wm.obj_export):
+                    bpy.ops.wm.obj_export(filepath=tmp_path, export_selected_objects=target is not None)
+                else:
+                    bpy.ops.export_scene.obj(filepath=tmp_path, use_selection=target is not None)
+            elif fmt == "fbx":
+                if not has_op(bpy.ops.export_scene.fbx):
+                    raise Exception("FBX exporter is not available - enable the 'FBX format' addon in Blender preferences")
+                bpy.ops.export_scene.fbx(filepath=tmp_path, use_selection=target is not None)
+            elif fmt == "stl":
+                if has_op(bpy.ops.wm.stl_export):
+                    bpy.ops.wm.stl_export(filepath=tmp_path, export_selected_objects=target is not None)
+                else:
+                    bpy.ops.export_mesh.stl(filepath=tmp_path, use_selection=target is not None)
+            elif fmt == "ply":
+                if has_op(bpy.ops.wm.ply_export):
+                    bpy.ops.wm.ply_export(filepath=tmp_path, export_selected_objects=target is not None)
+                else:
+                    bpy.ops.export_mesh.ply(filepath=tmp_path, use_selection=target is not None)
+            elif fmt == "usd":
+                if not has_op(bpy.ops.wm.usd_export):
+                    raise Exception("USD exporter is not available in this Blender version")
+                bpy.ops.wm.usd_export(filepath=tmp_path, selected_objects_only=target is not None)
+
+            file_size = os.path.getsize(tmp_path)
+            if file_size == 0:
+                raise Exception("Export produced an empty file")
+
+            if not file_name:
+                base = object_name or (bpy.context.scene.name or "model")
+                file_name = f"{base}{suffixes[fmt]}"
+
+            with open(tmp_path, "rb") as f:
+                response = requests.post(
+                    server_url,
+                    files={field_name: (file_name, f)},
+                    data=extra_fields or {},
+                    headers=headers or {},
+                    timeout=timeout,
+                )
+
+            if response.status_code >= 400:
+                raise Exception(f"Server returned HTTP {response.status_code}: {response.text[:500]}")
+
+            return {
+                "uploaded": True,
+                "file_name": file_name,
+                "file_size": file_size,
+                "format": fmt,
+                "object_name": object_name,
+                "status_code": response.status_code,
+                "response_text": response.text[:500],
+            }
+        except Exception as e:
+            traceback.print_exc()
+            raise Exception(f"Failed to export and upload model: {str(e)}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 

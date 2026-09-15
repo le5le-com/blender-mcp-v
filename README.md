@@ -150,6 +150,7 @@ In Blender's 3D viewport, press `N` → open the **MCP for Blender** tab → cli
 | **Object manipulation** | Create, modify, and delete 3D objects in Blender |
 | **Material control** | Apply and modify materials and colors |
 | **Scene inspection** | Get detailed information about the current Blender scene |
+| **Model upload** | Export the scene or a selected object as a 3D model (glb, obj, fbx, stl, ply, usd) and upload it to a preconfigured server (`BLENDERMCP_UPLOAD_URL`) via HTTP POST |
 | **Code execution** | Run arbitrary Python code in Blender from Claude |
 | **Asset & model generation** | Poly Haven assets, Sketchfab models, Poly Pizza low-poly models, and AI-generated 3D models via Hyper3D Rodin and Hunyuan3D |
 
@@ -299,6 +300,11 @@ The following environment variables can be used to configure the Blender connect
 | `BLENDER_HOST` | `localhost` | Host address for Blender socket server |
 | `BLENDER_PORT` | `9876` | Port number for Blender socket server |
 | `BLENDER_MCP_SAFE_MODE` | off | Set to `1` to validate scripts before they run in Blender (see below) |
+| `BLENDERMCP_UPLOAD_URL` | — | Fixed upload endpoint used by the `upload_model_to_server` tool (required for uploads) |
+| `BLENDERMCP_UPLOAD_TOKEN` | — | Optional bearer token for the upload endpoint, sent as an `Authorization` header |
+| `BLENDERMCP_UPLOAD_FORM_FIELDS` | see description | Optional JSON object of extra multipart form fields, overriding the defaults `{"conflict": "", "directory": "/3D/模型", "length": "1", "shared": "true"}` |
+| `MCP_TRANSPORT` | `stdio` | Set to `sse` to serve the MCP protocol over HTTP instead of stdio |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | Bind address for SSE mode (keep the port different from `BLENDER_PORT`) |
 
 Example:
 

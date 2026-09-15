@@ -1669,6 +1669,100 @@ def record_trajectory_feedback(
         return f"Trajectory feedback skipped: {e}"
 
 
+# Fixed upload target for upload_model_to_server, injected via environment variables
+UPLOAD_SERVER_URL_ENV = "BLENDERMCP_UPLOAD_URL"
+UPLOAD_AUTH_TOKEN_ENV = "BLENDERMCP_UPLOAD_TOKEN"
+# Optional JSON object of extra multipart form fields, overrides the defaults below
+UPLOAD_FORM_FIELDS_ENV = "BLENDERMCP_UPLOAD_FORM_FIELDS"
+DEFAULT_UPLOAD_FORM_FIELDS = {
+    "conflict": "",
+    "directory": "/3D/模型",
+    "length": "1",
+    "shared": "true",
+}
+
+@mcp.tool()
+@telemetry_tool("upload_model_to_server")
+def upload_model_to_server(
+    ctx: Context,
+    object_name: str = None,
+    file_format: str = "glb",
+    file_name: str = None,
+    field_name: str = "file",
+    user_prompt: str = ""
+) -> str:
+    """
+    Export the current Blender scene (or a single object) as a 3D model file and
+    upload it to the preconfigured server via HTTP POST (multipart/form-data).
+
+    The upload endpoint and credentials are fixed through environment variables:
+    - BLENDERMCP_UPLOAD_URL: the full URL of the upload endpoint (required)
+    - BLENDERMCP_UPLOAD_TOKEN: optional bearer token sent as Authorization header
+    - BLENDERMCP_UPLOAD_FORM_FIELDS: optional JSON object of extra multipart form fields,
+      overriding the defaults: {"conflict": "", "directory": "/3D/模型", "length": "1", "shared": "true"}
+
+    Parameters:
+    - object_name: Optional. Name of a specific object to export (its children are included). If omitted, the whole scene is exported.
+    - file_format: Export format: glb (default), obj, fbx, stl, ply, usd
+    - file_name: Optional file name sent to the server (defaults to the object or scene name with the format extension)
+    - field_name: Multipart form field name for the file (default: "file")
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+
+    Returns a message with the server's HTTP status and response.
+    """
+    try:
+        server_url = os.getenv(UPLOAD_SERVER_URL_ENV)
+        if not server_url:
+            return (f"Error: Upload server is not configured. Set the {UPLOAD_SERVER_URL_ENV} "
+                    f"environment variable to your upload endpoint, e.g. https://example.com/upload")
+
+        parsed = urlparse(server_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return f"Error: Invalid {UPLOAD_SERVER_URL_ENV} '{server_url}'. Provide a full http(s) URL."
+
+        headers = {}
+        auth_token = os.getenv(UPLOAD_AUTH_TOKEN_ENV)
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        extra_fields = dict(DEFAULT_UPLOAD_FORM_FIELDS)
+        raw_fields = os.getenv(UPLOAD_FORM_FIELDS_ENV)
+        if raw_fields:
+            try:
+                parsed_fields = json.loads(raw_fields)
+            except json.JSONDecodeError as e:
+                return f"Error: {UPLOAD_FORM_FIELDS_ENV} is not valid JSON: {e}"
+            if not isinstance(parsed_fields, dict):
+                return f"Error: {UPLOAD_FORM_FIELDS_ENV} must be a JSON object of field name to value"
+            extra_fields = {str(k): str(v) for k, v in parsed_fields.items()}
+
+        blender = get_blender_connection()
+        result = blender.send_command("upload_model_to_server", {
+            "server_url": server_url,
+            "object_name": object_name,
+            "file_format": file_format,
+            "file_name": file_name,
+            "field_name": field_name,
+            "headers": headers or None,
+            "extra_fields": extra_fields,
+        })
+
+        if "error" in result:
+            return f"Error: {result['error']}"
+
+        scope = f"object '{object_name}'" if object_name else "the whole scene"
+        output = f"Exported {scope} as {result.get('file_name')} ({result.get('format')}, {result.get('file_size', 0) / 1024:.1f} KB) "
+        output += f"and uploaded it to {server_url}.\n"
+        output += f"Server responded with HTTP {result.get('status_code')}"
+        response_text = result.get("response_text", "").strip()
+        if response_text:
+            output += f": {response_text}"
+        return output
+    except Exception as e:
+        logger.error(f"Error uploading model to server: {str(e)}")
+        return f"Error uploading model to server: {str(e)}"
+
+
 @mcp.prompt()
 def asset_creation_strategy() -> str:
     """Defines the preferred strategy for creating assets in Blender"""
@@ -1818,7 +1912,13 @@ def main():
             "Setup guide: https://github.com/ahujasid/blender-mcp#installation "
             "(if the addon is outdated this logs how to update it: uvx blender-mcp install-addon)"
         )
-    mcp.run()
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    if transport == "sse":
+        # Use a port different from the Blender socket server (9876) to avoid conflicts
+        mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
+        mcp.settings.port = int(os.getenv("MCP_PORT", 8080))
+        logger.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
+    mcp.run(transport=transport)
 
 if __name__ == "__main__":
     main()

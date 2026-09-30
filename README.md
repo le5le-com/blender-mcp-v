@@ -295,7 +295,7 @@ To enable [safe mode](#safe-mode) in the container, add `"-e", "BLENDER_MCP_SAFE
 
 You can run the MCP server as a single executable file — no Python or uv required on the machine. Builds are produced with PyInstaller.
 
-Pre-built downloads (Windows + macOS) are attached as artifacts of the **Build Executables** GitHub Actions workflow (triggered manually or by pushing a `v*` tag). The zip also contains `.env.example`.
+Pre-built downloads (Windows + macOS) are attached as artifacts of the **Build Executables** GitHub Actions workflow (triggered manually or by pushing a `v*` tag). Each zip contains the executable, the Blender addon installer (`blender-mcp-addon.zip` — install it in Blender via *Edit → Preferences → Add-ons → Install from Disk*), and `.env.example`.
 
 To build locally on macOS or Linux:
 

@@ -1,0 +1,60 @@
+name: Build Executables
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build executable
+        run: uv run pyinstaller blender-mcp.spec --noconfirm
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item .env.example dist/.env.example
+          Compress-Archive -Path dist/blender-mcp.exe, dist/.env.example -DestinationPath dist/blender-mcp-windows.zip
+
+      - name: Package artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cp .env.example dist/.env.example
+          cd dist && zip blender-mcp-macos.zip blender-mcp .env.example
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-mcp-windows
+          path: dist/blender-mcp-windows.zip
+          retention-days: 14
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-mcp-macos
+          path: dist/blender-mcp-macos.zip
+          retention-days: 14

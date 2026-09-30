@@ -291,6 +291,32 @@ On **Linux**, `host.docker.internal` doesn't exist and the addon only listens on
 
 To enable [safe mode](#safe-mode) in the container, add `"-e", "BLENDER_MCP_SAFE_MODE=1"` to `args`.
 
+### Run as a Standalone Executable
+
+You can run the MCP server as a single executable file — no Python or uv required on the machine. Builds are produced with PyInstaller.
+
+Pre-built downloads (Windows + macOS) are attached as artifacts of the **Build Executables** GitHub Actions workflow (triggered manually or by pushing a `v*` tag). The zip also contains `.env.example`.
+
+To build locally on macOS or Linux:
+
+```bash
+uv sync
+uv run pyinstaller blender-mcp.spec --noconfirm
+# output: dist/blender-mcp
+```
+
+On Windows run the same commands in PowerShell; the output is `dist\blender-mcp.exe`. (PyInstaller does not cross-compile, so build Windows binaries on Windows — or use the CI artifacts.)
+
+Configuration: the executable reads a `.env` file from the **current working directory** at startup (same as running from source — see [Environment Variables](#environment-variables)). Copy `.env.example` next to the executable, rename it to `.env`, fill in your values, then launch the executable from that directory:
+
+```bash
+cd /path/to/blender-mcp
+cp .env.example .env   # edit it
+./blender-mcp          # Windows: blender-mcp.exe
+```
+
+Alternatively set `BLENDERMCP_ENV_FILE=/absolute/path/to/.env` before launching.
+
 ### Environment Variables
 
 The following environment variables can be used to configure the Blender connection.

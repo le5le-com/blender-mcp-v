@@ -28,6 +28,8 @@ from .addon_manager import (
 )
 from .consent_prompt import maybe_prompt_for_consent
 from .safe_mode import safe_mode_enabled, validate_code, SandboxViolation, SAFE_MODE_ENV
+from . import auth
+from .env import load_dotenv
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -205,6 +207,22 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         # Just log that we're starting up
         logger.info("BlenderMCP server starting up")
 
+        # uvicorn's dictConfig runs at server startup and resets
+        # uvicorn.access back to INFO, so this must happen after that, not at
+        # import time - otherwise every request gets logged.
+        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+        # Restore a previous login (token persisted on disk) so a server
+        # restart does not log the user out.
+        try:
+            restored = await anyio.to_thread.run_sync(
+                auth.get_auth_manager().load_persisted_state
+            )
+            if restored:
+                logger.info("Previous le5le login restored")
+        except Exception as e:
+            logger.debug(f"Auth state restore skipped: {e}")
+
         try:
             status = check_addon_status_on_startup()
             if status.needs_action:
@@ -301,8 +319,28 @@ def get_blender_connection():
             raise Exception("Could not connect to Blender. Make sure the Blender addon is running.")
         logger.info("Created new persistent connection to Blender")
         _maybe_handshake_addon(_blender_connection)
+        # Re-deliver the login state after a (re)connect: the push on login
+        # may have happened while Blender was unreachable.
+        if auth.get_auth_manager().status()["logged_in"]:
+            _push_auth_state(blender=_blender_connection)
 
     return _blender_connection
+
+
+def _push_auth_state(status: Dict[str, Any] = None, blender: BlenderConnection = None) -> None:
+    """Forward the login state to the Blender addon over the socket."""
+    try:
+        status = status or auth.get_auth_manager().status()
+        blender = blender or get_blender_connection()
+        blender.send_command("set_auth_info", {
+            "logged_in": bool(status["logged_in"]),
+            "username": status["username"] or "",
+        })
+    except Exception as e:
+        logger.debug(f"Could not push auth state to Blender: {e}")
+
+
+auth.set_status_listener(_push_auth_state)
 
 
 @mcp.tool()
@@ -344,6 +382,28 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
         return json.dumps(payload, indent=2) + await maybe_prompt_for_consent(ctx)
     except Exception as e:
         return f"Error checking addon status: {e}"
+
+
+@mcp.tool()
+def get_user_info() -> str:
+    """Get the le5le account login status and user profile.
+
+    Login is initiated from the Blender addon panel ("Login" button): it opens
+    the account website (BLENDERMCP_LOGIN_URL) in a browser, and after login
+    the site redirects back to this server's auth callback with a JWT token,
+    which this server uses to fetch the profile (BLENDERMCP_PROFILE_URL).
+
+    Returns JSON with logged_in, username, user_info and error. When logged
+    out, also returns login_url (open it in a browser to log in) and a hint.
+    """
+    status = auth.get_auth_manager().status()
+    if not status["logged_in"]:
+        status["login_url"] = auth.build_login_url()
+        status["hint"] = (
+            "Not logged in. Ask the user to click 'Login' in the Blender MCP "
+            "panel, or open login_url in a browser."
+        )
+    return json.dumps(status, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -1697,7 +1757,8 @@ def upload_model_to_server(
 
     The upload endpoint and credentials are fixed through environment variables:
     - BLENDERMCP_UPLOAD_URL: the full URL of the upload endpoint (required)
-    - BLENDERMCP_UPLOAD_TOKEN: optional bearer token sent as Authorization header
+    - BLENDERMCP_UPLOAD_TOKEN: optional bearer token sent as Authorization header;
+      when unset, the token of the currently logged-in le5le account is used
     - BLENDERMCP_UPLOAD_FORM_FIELDS: optional JSON object of extra multipart form fields,
       overriding the defaults: {"conflict": "", "directory": "/3D/模型", "length": "1", "shared": "true"}
 
@@ -1721,7 +1782,7 @@ def upload_model_to_server(
             return f"Error: Invalid {UPLOAD_SERVER_URL_ENV} '{server_url}'. Provide a full http(s) URL."
 
         headers = {}
-        auth_token = os.getenv(UPLOAD_AUTH_TOKEN_ENV)
+        auth_token = os.getenv(UPLOAD_AUTH_TOKEN_ENV) or auth.get_auth_manager().token
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
 
@@ -1890,6 +1951,8 @@ def asset_creation_strategy() -> str:
 
 def main():
     """Run the MCP server, or addon install CLI subcommands."""
+    load_dotenv()
+
     if len(sys.argv) > 1 and sys.argv[1] in {"install-addon", "addon-paths", "-h", "--help"}:
         code = run_addon_cli(sys.argv[1:])
         if code >= 0:
@@ -1917,7 +1980,18 @@ def main():
         # Use a port different from the Blender socket server (9876) to avoid conflicts
         mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
         mcp.settings.port = int(os.getenv("MCP_PORT", 8080))
+        if auth.register_auth_routes(mcp):
+            logger.info(f"Auth endpoints served on the SSE server, login callback: {auth.get_callback_url()}")
+        else:
+            logger.warning("Installed mcp version has no custom_route support; auth endpoints disabled")
         logger.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
+    else:
+        # stdio has no HTTP server of its own; serve the login callback
+        # endpoints on a standalone HTTP server in a background thread.
+        try:
+            auth.start_auth_server()
+        except Exception as e:
+            logger.warning(f"Auth server could not start: {e}")
     mcp.run(transport=transport)
 
 if __name__ == "__main__":

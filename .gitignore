@@ -21,3 +21,6 @@ local_tests/
 supabase/
 
 scripts/
+
+# Local environment config (may hold tokens)
+.env

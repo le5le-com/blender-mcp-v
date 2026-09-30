@@ -29,7 +29,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "MCP for Blender",
     "author": "BlenderMCP",
-    "version": (1, 6),
+    "version": (1, 7),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > MCP for Blender",
     "description": "Connect Blender to Claude via MCP",
@@ -37,7 +37,7 @@ bl_info = {
 }
 
 # Keep in sync with blender_mcp.addon_manager.EXPECTED_ADDON_PROTOCOL_VERSION.
-ADDON_PROTOCOL_VERSION = 5
+ADDON_PROTOCOL_VERSION = 6
 
 # Per-snapshot object cap for get_world_state_snapshot. Keep in sync with
 # blender_mcp.trajectory.MAX_SNAPSHOT_OBJECTS.
@@ -49,6 +49,64 @@ MAX_SNAPSHOT_OBJECTS = 4000
 MAX_SNAPSHOT_SELECTED = 1000
 
 RODIN_FREE_TRIAL_KEY = "vibecoding"
+
+#region le5le account login
+# The login page and the auth callback are served by the MCP server (see the
+# BLENDERMCP_* environment variables). The addon only opens the browser; the
+# MCP server pushes the login state to the addon over the socket
+# (set_auth_info) whenever it changes, so there is no polling here.
+
+DEFAULT_LOGIN_URL = "http://localhost:5173/login"
+DEFAULT_AUTH_PORT = 8080
+
+
+def _get_auth_server_base():
+    """Base URL of the MCP server's auth HTTP endpoints."""
+    base = os.getenv("BLENDERMCP_AUTH_SERVER_URL", "")
+    if base:
+        return base.rstrip("/")
+    port = os.getenv("BLENDERMCP_AUTH_PORT") or os.getenv("MCP_PORT") or str(DEFAULT_AUTH_PORT)
+    return f"http://localhost:{port}"
+
+
+def _build_login_url():
+    """Login page URL with the callback attached as `cb`.
+
+    The login page reads the redirect target from `route.query.cb` and after
+    login redirects to it with `?token=<jwt>` appended.
+    """
+    login_url = os.getenv("BLENDERMCP_LOGIN_URL", DEFAULT_LOGIN_URL)
+    callback = os.getenv("BLENDERMCP_AUTH_CALLBACK_URL", "") or f"{_get_auth_server_base()}/auth/callback"
+    sep = "&" if "?" in login_url else "?"
+    quoted = quote(callback, safe="")
+    print(f"{login_url}{sep}cb={quoted}")
+    return f"{login_url}{sep}cb={quoted}"
+
+
+def apply_auth_status(logged_in, username):
+    """Mirror the login state onto scene props and redraw the sidebar.
+
+    Main thread only (called from the command timer and operators).
+    """
+    try:
+        scene = bpy.context.scene
+        if scene is None:
+            return
+        changed = (
+            scene.blendermcp_auth_logged_in != logged_in
+            or scene.blendermcp_auth_username != username
+        )
+        if not changed:
+            return
+        scene.blendermcp_auth_logged_in = logged_in
+        scene.blendermcp_auth_username = username
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    except Exception:
+        pass
+#endregion
 
 # Add User-Agent as required by Poly Haven API
 REQ_HEADERS = requests.utils.default_headers()
@@ -771,6 +829,7 @@ class BlenderMCPServer:
             "drain_human_activity": self.drain_human_activity,
             "get_telemetry_consent": self.get_telemetry_consent,
             "set_telemetry_consent": self.set_telemetry_consent,
+            "set_auth_info": self.set_auth_info,
             "get_polyhaven_status": self.get_polyhaven_status,
             "get_hyper3d_status": self.get_hyper3d_status,
             "get_sketchfab_status": self.get_sketchfab_status,
@@ -855,6 +914,7 @@ class BlenderMCPServer:
                 "drain_human_activity",
                 "get_telemetry_consent",
                 "set_telemetry_consent",
+                "set_auth_info",
             ]),
             "blender_version": bpy.app.version_string,
         }
@@ -892,6 +952,11 @@ class BlenderMCPServer:
             print(f"Error in get_scene_info: {str(e)}")
             traceback.print_exc()
             return {"error": str(e)}
+
+    def set_auth_info(self, logged_in=False, username=""):
+        """Receive the login state pushed by the MCP server (login/logout)."""
+        apply_auth_status(bool(logged_in), str(username or ""))
+        return {"applied": True}
 
     def drain_human_activity(self):
         """Return human-originated events buffered since the last drain.
@@ -3877,6 +3942,18 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
         cred_box.prop(self, "hunyuan3d_api_url", text="Hunyuan3D API URL")
 
 # Blender UI Panel
+def _integration_header(layout, scene, prop_name, title, icon):
+    """Draw an integration as a box with a checkbox header row.
+    Returns the box if the integration is enabled (for settings), else None."""
+    box = layout.box()
+    row = box.row()
+    row.prop(scene, prop_name, text="")
+    row.label(text=title, icon=icon)
+    if getattr(scene, prop_name):
+        row.label(text="", icon='CHECKMARK')
+    return box if getattr(scene, prop_name) else None
+
+
 class BLENDERMCP_PT_Panel(bpy.types.Panel):
     bl_label = "MCP for Blender"
     bl_idname = "BLENDERMCP_PT_Panel"
@@ -3884,39 +3961,68 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'MCP for Blender'
 
-    def _integration_header(self, layout, scene, prop_name, title, icon):
-        """Draw an integration as a box with a checkbox header row.
-        Returns the box if the integration is enabled (for settings), else None."""
-        box = layout.box()
-        row = box.row()
-        row.prop(scene, prop_name, text="")
-        row.label(text=title, icon=icon)
-        return box if getattr(scene, prop_name) else None
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        # Account card (le5le login, state owned by the MCP server)
+        account_box = layout.box()
+        if scene.blendermcp_auth_logged_in:
+            row = account_box.row(align=True)
+            row.label(text="", icon='USER')
+            row.label(text=scene.blendermcp_auth_username or "Logged in")
+            row.operator("blendermcp.refresh_auth", text="", icon='FILE_REFRESH', emboss=False)
+            row = account_box.row(align=True)
+            row.operator("blendermcp.logout", text="Logout", icon='X')
+        else:
+            row = account_box.row(align=True)
+            row.label(text="Not logged in", icon='RADIOBUT_OFF')
+            row.operator("blendermcp.refresh_auth", text="", icon='FILE_REFRESH', emboss=False)
+            account_box.separator(factor=0.5)
+            col = account_box.column()
+            col.scale_y = 1.5
+            col.operator("blendermcp.login", text="Login with Account", icon='URL')
+
+        # Connection card
+        conn_box = layout.box()
+        if scene.blendermcp_server_running:
+            row = conn_box.row(align=True)
+            row.label(text=f"MCP Server · port {scene.blendermcp_port}", icon='CHECKMARK')
+            row = conn_box.row(align=True)
+            row.scale_y = 1.2
+            row.operator("blendermcp.stop_server", text="Disconnect", icon='X')
+        else:
+            conn_box.label(text="MCP Server not connected", icon='RADIOBUT_OFF')
+            conn_box.prop(scene, "blendermcp_port")
+            conn_box.separator(factor=0.5)
+            col = conn_box.column()
+            col.scale_y = 1.4
+            col.operator("blendermcp.start_server", text="Connect to MCP Server", icon='PLAY')
+
+        # Feedback footer
+        layout.separator()
+        footer = layout.column(align=True)
+        footer.label(text="Schedule a feedback call", icon='URL')
+        footer.label(text="bit.ly/blender-mcp-call")
+
+
+class BLENDERMCP_PT_AssetLibraries(bpy.types.Panel):
+    bl_label = "Asset Libraries"
+    bl_idname = "BLENDERMCP_PT_AssetLibraries"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'MCP for Blender'
+    bl_parent_id = "BLENDERMCP_PT_Panel"
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
         prefs = get_blendermcp_addon_preferences(context)
 
-        # Connection
-        box = layout.box()
-        col = box.column()
-        if scene.blendermcp_server_running:
-            col.label(text=f"Connected on port {scene.blendermcp_port}", icon='CHECKMARK')
-            col.operator("blendermcp.stop_server", text="Disconnect", icon='X')
-        else:
-            col.label(text="Not connected", icon='RADIOBUT_OFF')
-            col.prop(scene, "blendermcp_port")
-            col.operator("blendermcp.start_server", text="Connect to MCP server", icon='PLAY')
-
-        # Asset libraries
-        layout.separator()
-        layout.label(text="Asset Libraries", icon='ASSET_MANAGER')
-
-        self._integration_header(
+        _integration_header(
             layout, scene, "blendermcp_use_polyhaven", "Poly Haven", 'WORLD')
 
-        sub = self._integration_header(
+        sub = _integration_header(
             layout, scene, "blendermcp_use_sketchfab", "Sketchfab", 'MESH_MONKEY')
         if sub:
             col = sub.column(align=True)
@@ -3925,7 +4031,7 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
             else:
                 col.prop(scene, "blendermcp_sketchfab_api_key", text="API Key")
 
-        sub = self._integration_header(
+        sub = _integration_header(
             layout, scene, "blendermcp_use_polypizza", "Poly Pizza", 'MESH_ICOSPHERE')
         if sub:
             col = sub.column(align=True)
@@ -3934,11 +4040,21 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
             else:
                 col.prop(scene, "blendermcp_polypizza_api_key", text="API Key")
 
-        # AI model generation
-        layout.separator()
-        layout.label(text="AI Model Generation", icon='SHADERFX')
 
-        sub = self._integration_header(
+class BLENDERMCP_PT_AIGeneration(bpy.types.Panel):
+    bl_label = "AI Model Generation"
+    bl_idname = "BLENDERMCP_PT_AIGeneration"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'MCP for Blender'
+    bl_parent_id = "BLENDERMCP_PT_Panel"
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        prefs = get_blendermcp_addon_preferences(context)
+
+        sub = _integration_header(
             layout, scene, "blendermcp_use_hyper3d", "Hyper3D Rodin", 'MESH_UVSPHERE')
         if sub:
             col = sub.column(align=True)
@@ -3950,7 +4066,7 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
             sub.operator("blendermcp.set_hyper3d_free_trial_api_key",
                          text="Set Free Trial API Key", icon='KEYINGSET')
 
-        sub = self._integration_header(
+        sub = _integration_header(
             layout, scene, "blendermcp_use_hunyuan3d", "Tencent Hunyuan 3D", 'MESH_CUBE')
         if sub:
             col = sub.column(align=True)
@@ -3972,14 +4088,6 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
                 col.prop(scene, "blendermcp_hunyuan3d_num_inference_steps", text="Inference Steps")
                 col.prop(scene, "blendermcp_hunyuan3d_guidance_scale", text="Guidance Scale")
                 col.prop(scene, "blendermcp_hunyuan3d_texture", text="Generate Texture")
-
-        # Feedback section
-        layout.separator()
-        feedback_box = layout.box()
-
-        col = feedback_box.column(align=True)
-        col.label(text="Schedule a feedback call", icon='URL')
-        col.label(text="bit.ly/blender-mcp-call")
 
 # Operator to set Hyper3D API Key
 class BLENDERMCP_OT_SetFreeTrialHyper3DAPIKey(bpy.types.Operator):
@@ -4054,6 +4162,64 @@ class BLENDERMCP_OT_OpenTerms(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Could not open Terms and Conditions: {str(e)}")
         
+        return {'FINISHED'}
+
+# Operator to open the le5le login page
+class BLENDERMCP_OT_Login(bpy.types.Operator):
+    bl_idname = "blendermcp.login"
+    bl_label = "Login"
+    bl_description = "Open the account login page in your browser; after login the MCP server receives the token"
+
+    def execute(self, context):
+        try:
+            import webbrowser
+            webbrowser.open(_build_login_url())
+            self.report({'INFO'},_build_login_url())
+            self.report({'INFO'}, "Login page opened in browser")
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not open login page: {str(e)}")
+        return {'FINISHED'}
+
+# Operator to log out of the le5le account
+class BLENDERMCP_OT_Logout(bpy.types.Operator):
+    bl_idname = "blendermcp.logout"
+    bl_label = "Logout"
+    bl_description = "Log out; clears the token stored by the MCP server"
+
+    def execute(self, context):
+        # The token lives in the MCP server, so logout is an HTTP call to it.
+        # Run it off the main thread to avoid blocking the UI.
+        def _do_logout():
+            try:
+                requests.get(f"{_get_auth_server_base()}/auth/logout", timeout=3)
+            except Exception:
+                pass
+        threading.Thread(target=_do_logout, daemon=True).start()
+
+        apply_auth_status(False, "")
+        self.report({'INFO'}, "Logged out")
+        return {'FINISHED'}
+
+# Operator to refresh the login state from the MCP server
+class BLENDERMCP_OT_RefreshAuth(bpy.types.Operator):
+    bl_idname = "blendermcp.refresh_auth"
+    bl_label = "Refresh Login State"
+    bl_description = "Fetch the current login state from the MCP server"
+
+    def execute(self, context):
+        try:
+            response = requests.get(f"{_get_auth_server_base()}/auth/status", timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                apply_auth_status(bool(data.get("logged_in")), str(data.get("username") or ""))
+                if data.get("logged_in"):
+                    self.report({'INFO'}, f"Logged in as {data.get('username') or ''}")
+                else:
+                    self.report({'INFO'}, "Not logged in")
+            else:
+                self.report({'WARNING'}, f"Auth server returned HTTP {response.status_code}")
+        except Exception:
+            self.report({'WARNING'}, "MCP server auth endpoint not reachable")
         return {'FINISHED'}
 
 # Registration functions
@@ -4197,14 +4363,31 @@ def register():
         default=""
     )
 
+    bpy.types.Scene.blendermcp_auth_logged_in = bpy.props.BoolProperty(
+        name="Logged In",
+        description="Whether a le5le account is logged in on the MCP server",
+        default=False
+    )
+
+    bpy.types.Scene.blendermcp_auth_username = bpy.props.StringProperty(
+        name="Username",
+        description="Username of the le5le account logged in on the MCP server",
+        default=""
+    )
+
     # Register preferences class
     bpy.utils.register_class(BLENDERMCP_AddonPreferences)
 
     bpy.utils.register_class(BLENDERMCP_PT_Panel)
+    bpy.utils.register_class(BLENDERMCP_PT_AssetLibraries)
+    bpy.utils.register_class(BLENDERMCP_PT_AIGeneration)
     bpy.utils.register_class(BLENDERMCP_OT_SetFreeTrialHyper3DAPIKey)
     bpy.utils.register_class(BLENDERMCP_OT_StartServer)
     bpy.utils.register_class(BLENDERMCP_OT_StopServer)
     bpy.utils.register_class(BLENDERMCP_OT_OpenTerms)
+    bpy.utils.register_class(BLENDERMCP_OT_Login)
+    bpy.utils.register_class(BLENDERMCP_OT_Logout)
+    bpy.utils.register_class(BLENDERMCP_OT_RefreshAuth)
 
     # Auto-start the server so the MCP client can connect without manual UI interaction
     scene = getattr(bpy.context, 'scene', None)
@@ -4235,10 +4418,15 @@ def unregister():
         del bpy.types.blendermcp_server
 
     bpy.utils.unregister_class(BLENDERMCP_PT_Panel)
+    bpy.utils.unregister_class(BLENDERMCP_PT_AssetLibraries)
+    bpy.utils.unregister_class(BLENDERMCP_PT_AIGeneration)
     bpy.utils.unregister_class(BLENDERMCP_OT_SetFreeTrialHyper3DAPIKey)
     bpy.utils.unregister_class(BLENDERMCP_OT_StartServer)
     bpy.utils.unregister_class(BLENDERMCP_OT_StopServer)
     bpy.utils.unregister_class(BLENDERMCP_OT_OpenTerms)
+    bpy.utils.unregister_class(BLENDERMCP_OT_Login)
+    bpy.utils.unregister_class(BLENDERMCP_OT_Logout)
+    bpy.utils.unregister_class(BLENDERMCP_OT_RefreshAuth)
     bpy.utils.unregister_class(BLENDERMCP_AddonPreferences)
 
     del bpy.types.Scene.blendermcp_port
@@ -4261,6 +4449,8 @@ def unregister():
     del bpy.types.Scene.blendermcp_hunyuan3d_num_inference_steps
     del bpy.types.Scene.blendermcp_hunyuan3d_guidance_scale
     del bpy.types.Scene.blendermcp_hunyuan3d_texture
+    del bpy.types.Scene.blendermcp_auth_logged_in
+    del bpy.types.Scene.blendermcp_auth_username
 
     print("BlenderMCP addon unregistered")
 

@@ -293,7 +293,11 @@ To enable [safe mode](#safe-mode) in the container, add `"-e", "BLENDER_MCP_SAFE
 
 ### Environment Variables
 
-The following environment variables can be used to configure the Blender connection:
+The following environment variables can be used to configure the Blender connection.
+They can also be placed in a `.env` file — the server loads `.env` from the current
+working directory at startup (override the location with `BLENDERMCP_ENV_FILE`).
+Variables already set in the environment take precedence over the file. See
+`.env.example` for a ready-to-copy template.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -305,6 +309,31 @@ The following environment variables can be used to configure the Blender connect
 | `BLENDERMCP_UPLOAD_FORM_FIELDS` | see description | Optional JSON object of extra multipart form fields, overriding the defaults `{"conflict": "", "directory": "/3D/模型", "length": "1", "shared": "true"}` |
 | `MCP_TRANSPORT` | `stdio` | Set to `sse` to serve the MCP protocol over HTTP instead of stdio |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | Bind address for SSE mode (keep the port different from `BLENDER_PORT`) |
+| `BLENDERMCP_LOGIN_URL` | `https://account.le5le.com/login` | Account login page opened by the addon's "Login" button; the callback URL is appended as `callback`/`cb` query parameters |
+| `BLENDERMCP_PROFILE_URL` | `https://v.le5le.com/api/account/profile` | Endpoint the MCP server calls with `?token=<jwt>` after login to fetch the user profile |
+| `BLENDERMCP_AUTH_CALLBACK_URL` | `http://localhost:<MCP_PORT>/auth/callback` | Full callback URL passed to the login page (override when the MCP server is not on the user's machine) |
+| `BLENDERMCP_AUTH_PORT` | `MCP_PORT` (8080) | Port of the auth HTTP endpoints; with stdio transport a standalone server is started on this port |
+| `BLENDERMCP_AUTH_SERVER_URL` | `http://localhost:<MCP_PORT>` | (Addon side) base URL of the MCP server's auth endpoints that the addon polls |
+| `BLENDERMCP_ENV_FILE` | `.env` | Path of the .env file loaded at startup |
+
+Example (le5le account login + SSE transport):
+
+```bash
+export MCP_TRANSPORT=sse
+export MCP_HOST=0.0.0.0
+export MCP_PORT=8080
+export BLENDER_HOST=localhost
+export BLENDER_PORT=9876
+export BLENDERMCP_UPLOAD_URL="https://account.le5le.com/api/file/upload"
+```
+
+With this running, clicking **Login** in the Blender panel opens the login page
+in a browser; after login the page redirects to
+`http://localhost:8080/auth/callback?token=<jwt>`, the MCP server stores the
+token and fetches the profile, and the panel shows the logged-in username. The
+same token is used as the bearer token for `upload_model_to_server` when
+`BLENDERMCP_UPLOAD_TOKEN` is not set. The AI can query the login state with the
+`get_user_info` tool.
 
 Example:
 

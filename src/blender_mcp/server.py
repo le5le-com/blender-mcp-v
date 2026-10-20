@@ -1980,6 +1980,18 @@ def main():
         # Use a port different from the Blender socket server (9876) to avoid conflicts
         mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
         mcp.settings.port = int(os.getenv("MCP_PORT", 8080))
+        # FastMCP was constructed with the default host (127.0.0.1), which
+        # auto-enables DNS rebinding protection with a localhost-only Host
+        # allowlist. The SSE server listens on all interfaces, so that
+        # allowlist rejects every LAN client with 421 Misdirected Request.
+        # Allow arbitrary LAN Host/Origin headers unless protection is
+        # explicitly requested via MCP_DNS_REBINDING_PROTECTION=1.
+        if os.getenv("MCP_DNS_REBINDING_PROTECTION", "").lower() not in {"1", "true", "yes"}:
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+            )
         if auth.register_auth_routes(mcp):
             logger.info(f"Auth endpoints served on the SSE server, login callback: {auth.get_callback_url()}")
         else:

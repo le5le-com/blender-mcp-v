@@ -34,17 +34,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Copy-Item .env.example dist/.env.example
+          Copy-Item .env.example dist/.env
           Compress-Archive -Path addon.py -DestinationPath dist/blender-mcp-addon.zip
-          Compress-Archive -Path dist/blender-mcp.exe, dist/.env.example, dist/blender-mcp-addon.zip -DestinationPath dist/blender-mcp-windows.zip
+          Compress-Archive -Path dist/blender-mcp.exe, dist/.env, dist/blender-mcp-addon.zip -DestinationPath dist/blender-mcp-windows.zip
 
       - name: Package artifact (macOS)
         if: runner.os == 'macOS'
         run: |
-          cp .env.example dist/.env.example
+          cp .env.example dist/.env
           cd dist
           zip -j blender-mcp-addon.zip ../addon.py
-          zip blender-mcp-macos.zip blender-mcp .env.example blender-mcp-addon.zip
+          zip blender-mcp-macos.zip blender-mcp .env blender-mcp-addon.zip
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'

@@ -7,12 +7,25 @@ always override .env (standard dotenv behavior).
 
 import logging
 import os
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger("BlenderMCPServer")
 
 ENV_FILE_ENV = "BLENDERMCP_ENV_FILE"
+
+
+def _executable_env_path() -> Optional[Path]:
+    """A .env next to the frozen executable, or None when running from source.
+
+    A double-clicked PyInstaller build gets the user's home directory as its
+    working directory, so a plain cwd lookup never finds the .env that ships
+    beside the binary.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    return Path(sys.executable).resolve().parent / ".env"
 
 
 def _parse_line(line: str) -> Optional[tuple[str, str]]:
@@ -36,13 +49,21 @@ def _parse_line(line: str) -> Optional[tuple[str, str]]:
 def load_dotenv(path: Optional[str] = None) -> Optional[Path]:
     """Load KEY=VALUE pairs from a .env file into os.environ.
 
-    Looks at BLENDERMCP_ENV_FILE first, then .env in the current working
-    directory. Existing environment variables are never overwritten.
+    Lookup order: the explicit path / BLENDERMCP_ENV_FILE, then a .env next
+    to the frozen executable, then .env in the current working directory.
+    Existing environment variables are never overwritten.
     Returns the loaded path, or None when no file was found.
     """
-    candidate = path or os.getenv(ENV_FILE_ENV) or ".env"
-    env_path = Path(candidate)
-    if not env_path.is_file():
+    explicit = path or os.getenv(ENV_FILE_ENV)
+    candidates: List[Path] = [Path(explicit)] if explicit else []
+    if not explicit:
+        exe_env = _executable_env_path()
+        if exe_env is not None:
+            candidates.append(exe_env)
+        candidates.append(Path(".env"))
+
+    env_path = next((c for c in candidates if c.is_file()), None)
+    if env_path is None:
         return None
 
     loaded = 0

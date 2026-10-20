@@ -56,7 +56,7 @@ RODIN_FREE_TRIAL_KEY = "vibecoding"
 # MCP server pushes the login state to the addon over the socket
 # (set_auth_info) whenever it changes, so there is no polling here.
 
-DEFAULT_LOGIN_URL = "http://localhost:5173/login"
+DEFAULT_LOGIN_URL = "https://account.le5le.com/login"
 DEFAULT_AUTH_PORT = 8080
 
 
@@ -70,13 +70,27 @@ def _get_auth_server_base():
 
 
 def _build_login_url():
-    """Login page URL with the callback attached as `cb`.
+    """URL to open in the browser for login.
 
-    The login page reads the redirect target from `route.query.cb` and after
-    login redirects to it with `?token=<jwt>` appended.
+    Prefers the MCP server's /auth/login endpoint, which redirects to the
+    login page configured on the server (BLENDERMCP_LOGIN_URL) with the
+    correct callback. The server owns this configuration; its .env never
+    reaches Blender's process, so duplicating the setting here would drift.
+    Only when the server is unreachable do we build the URL locally from
+    this process's environment.
     """
+    base = _get_auth_server_base()
+    try:
+        response = requests.get(f"{base}/auth/login", allow_redirects=False, timeout=2)
+        # Any 2xx/3xx means the server is up: 3xx = not logged in (redirect to
+        # the login page), 2xx = already logged in (status page).
+        if response.ok or response.is_redirect:
+            return f"{base}/auth/login"
+    except Exception:
+        pass
+
     login_url = os.getenv("BLENDERMCP_LOGIN_URL", DEFAULT_LOGIN_URL)
-    callback = os.getenv("BLENDERMCP_AUTH_CALLBACK_URL", "") or f"{_get_auth_server_base()}/auth/callback"
+    callback = os.getenv("BLENDERMCP_AUTH_CALLBACK_URL", "") or f"{base}/auth/callback"
     sep = "&" if "?" in login_url else "?"
     quoted = quote(callback, safe="")
     print(f"{login_url}{sep}cb={quoted}")
@@ -4173,8 +4187,9 @@ class BLENDERMCP_OT_Login(bpy.types.Operator):
     def execute(self, context):
         try:
             import webbrowser
-            webbrowser.open(_build_login_url())
-            self.report({'INFO'},_build_login_url())
+            url = _build_login_url()
+            webbrowser.open(url)
+            self.report({'INFO'}, url)
             self.report({'INFO'}, "Login page opened in browser")
         except Exception as e:
             self.report({'ERROR'}, f"Could not open login page: {str(e)}")

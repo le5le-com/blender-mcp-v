@@ -222,6 +222,13 @@ class TestHttpEndpoints:
         assert response.status_code in (302, 307)
         assert response.headers["location"].startswith("https://example.com/login?")
 
+    def test_login_shows_status_page_when_already_logged_in(self, client, manager):
+        manager.login("jwt123")
+        response = client.get("/auth/login", follow_redirects=False)
+        assert response.status_code == 200
+        assert "user-jwt123" in response.text
+        assert "location" not in response.headers
+
     def test_callback_with_profile_error_returns_502(self, client, monkeypatch):
         monkeypatch.setattr(
             auth, "fetch_profile", lambda token: (_ for _ in ()).throw(RuntimeError("down"))

@@ -1,9 +1,11 @@
 """le5le account login, owned by the MCP server.
 
 Flow:
-1. The Blender addon opens the login page (BLENDERMCP_LOGIN_URL) in the user's
-   browser, passing the callback URL as the `cb` query parameter (the login
-   page reads `route.query.cb`).
+1. The Blender addon opens /auth/login here in the user's browser. When a
+   valid token is already held, that endpoint shows an "already logged in"
+   page; otherwise it redirects to the login page (BLENDERMCP_LOGIN_URL),
+   passing the callback URL as the `cb` query parameter (the login page
+   reads `route.query.cb`).
 2. After login the page redirects back to the callback URL with the JWT as
    `?token=<jwt>` (or `&token=<jwt>` when the callback already has a query).
 3. The /auth/callback endpoint here stores the token and fetches the user
@@ -415,8 +417,19 @@ async def _auth_logout(request):
 
 
 async def _auth_login(request):
-    from starlette.responses import RedirectResponse
+    from starlette.responses import HTMLResponse, RedirectResponse
 
+    manager = get_auth_manager()
+    if manager.status()["logged_in"]:
+        return HTMLResponse(
+            _html_page(
+                "已登录",
+                "你已成功登录，可以关闭此页面并回到 Blender。/ "
+                "You are logged in; you can close this page and return to Blender.",
+                username=manager.username,
+                avatar_url=manager.avatar_url,
+            )
+        )
     return RedirectResponse(build_login_url())
 
 
